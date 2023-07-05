@@ -4,10 +4,15 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
+#include <fcntl.h>
+#include <stdio.h>
 #include <zephyr/drivers/tee.h>
 #include <zephyr/init.h>
 #include <zephyr/kernel.h>
 #include <zephyr/logging/log.h>
+#include <zephyr/posix/dirent.h>
+#include <zephyr/posix/unistd.h>
+#include <zephyr/sys/fdtable.h>
 
 #include <optee_msg_supplicant.h>
 #include <tee_client_api.h>
@@ -135,6 +140,451 @@ static int load_ta(uint32_t num_params, struct tee_param *params)
 	return TEEC_SUCCESS;
 }
 
+static int tee_fs_open(size_t num_params, struct tee_param *params, int flags)
+{
+	struct tee_shm *shm;
+	char *name, path[128 + 4] = "/tee";
+	int fd;
+
+	if (num_params != 3) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT ||
+	    (params[2].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_OUTPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	/*TODO do all safety checks */
+	shm = (struct tee_shm *)params[1].c;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	name = shm->addr;
+	strncat(path, name, 128);
+	fd = open(path, flags, 0600);
+	if (fd < 0) {
+		if (errno == ENOENT) {
+			return TEEC_ERROR_ITEM_NOT_FOUND;
+		}
+		LOG_ERR("failed to open/create %s (%d)", path, -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	params[2].a = fd;
+
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_close(size_t num_params, struct tee_param *params)
+{
+	if (num_params != 1  || (params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if (close((int)params[0].b) < 0) {
+		LOG_ERR("failed to close file (%d)", -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_read(size_t num_params, struct tee_param *params)
+{
+	int fd;
+	off_t offset, position;
+	size_t len, sz;
+	struct tee_shm *shm;
+	void *buf;
+
+	if (num_params != 2) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_OUTPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	fd = params[0].b;
+	offset = params[0].c;
+
+	/*TODO do all safety checks */
+	shm = (struct tee_shm *)params[1].c;
+	len = params[1].b;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	buf = shm->addr;
+	position = lseek(fd, offset, SEEK_SET);
+	if ((int)position < 0) {
+		LOG_ERR("invalid offset %lu (%d)", offset, -errno);
+		return TEEC_ERROR_ITEM_NOT_FOUND;
+	}
+
+	/*TODO: handle sz < len */
+	sz = read(fd, buf, len);
+	if ((int)sz < 0) {
+		LOG_ERR("read failure (%d)", -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	params[1].b = sz;
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_write(size_t num_params, struct tee_param *params)
+{
+	int fd;
+	off_t offset, position;
+	size_t len, sz;
+	struct tee_shm *shm;
+	void *buf;
+
+	if (num_params != 2) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	fd = params[0].b;
+	offset = params[0].c;
+
+	/*TODO do all safety checks */
+	shm = (struct tee_shm *)params[1].c;
+	len = params[1].b;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	buf = shm->addr;
+	position = lseek(fd, offset, SEEK_SET);
+	if ((int)position < 0) {
+		LOG_ERR("invalid offset %lu (%d)", offset, -errno);
+		return TEEC_ERROR_ITEM_NOT_FOUND;
+	}
+
+	sz = write(fd, buf, len);
+	if ((int)sz < 0) {
+		/*TODO: handle error cases */
+		LOG_ERR("write failure (%d)", -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	params[1].b = sz;
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_truncate(size_t num_params, struct tee_param *params)
+{
+	int rc, fd;
+	off_t len;
+	void *ptr = NULL;
+	struct fs_file_t *file;
+
+	if (num_params != 1  || (params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	fd = params[0].b;
+	len = params[0].c;
+	ptr = z_get_fd_obj(fd, NULL, 0);
+
+	if (!ptr) {
+		LOG_ERR("descriptor %d not found", fd);
+		return TEEC_ERROR_ITEM_NOT_FOUND;
+	}
+
+	/*HACK: this ptr is of hidden posix_fs_desc type, begins w/ file attr */
+	file = (struct fs_file_t *)ptr;
+	rc = fs_truncate(file, len);
+	if (rc < 0) {
+		LOG_ERR("failed to truncate (%d)", rc);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_remove(size_t num_params, struct tee_param *params)
+{
+	struct tee_shm *shm;
+	char *name, path[128 + 4] = "/tee";
+
+	if (num_params != 2) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	/*TODO do all safety checks */
+	shm = (struct tee_shm *)params[1].c;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	name = shm->addr;
+	strncat(path, name, 128);
+
+	if (unlink(path) < 0) {
+		if (errno == ENOENT) {
+			return TEEC_ERROR_ITEM_NOT_FOUND;
+		}
+		LOG_ERR("failed to unlink %s (%d)", path, -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	/*TODO: cleanup empty directories */
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_rename(size_t num_params, struct tee_param *params)
+{
+	char *name, path[128 + 4] = "/tee";
+	char *new_name, new_path[128 + 4] = "/tee";
+	struct tee_shm *shm;
+
+	if (num_params != 3) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT ||
+	    (params[2].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	/*TODO do all safety checks */
+	shm = (struct tee_shm *)params[1].c;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	name = shm->addr;
+	strncat(path, name, 128);
+
+	shm = (struct tee_shm *)params[2].c;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	new_name = shm->addr;
+	strncat(new_path, new_name, 128);
+
+	if (!params[0].b) {
+		struct stat buf;
+		if (stat(new_path, &buf) < 0) {
+			return TEEC_ERROR_ACCESS_CONFLICT;
+		}
+	}
+
+	if (rename(path, new_path) < 0) {
+		LOG_ERR("failed to rename %s -> %s (%d)",
+			path, new_path, -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_opendir(size_t num_params, struct tee_param *params)
+{
+	struct tee_shm *shm;
+	char *name, path[128 + 4] = "/tee";
+	DIR *dirp;
+
+	if (num_params != 3) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT ||
+	    (params[2].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_OUTPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	/*TODO do all safety checks */
+	shm = (struct tee_shm *)params[1].c;
+
+	if (!shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	name = shm->addr;
+	strncat(path, name, 128);
+	dirp = opendir(path);
+	if (!dirp) {
+		LOG_ERR("failed to open %s (%d)", path, -errno);
+		return TEEC_ERROR_ITEM_NOT_FOUND;
+	}
+
+	params[2].a =(uint64_t)dirp;
+
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_closedir(size_t num_params, struct tee_param *params)
+{
+	DIR *dirp;
+
+	if (num_params != 1  || (params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	/*TODO do all safety checks */
+	dirp = (DIR *)params[0].b;
+	if (!dirp) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if (closedir(dirp) < 0) {
+		LOG_ERR("closedir failed (%d)", -errno);
+		return TEEC_ERROR_GENERIC;
+	}
+
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs_readdir(size_t num_params, struct tee_param *params)
+{
+	struct tee_shm *shm;
+	struct dirent *entry;
+	DIR *dirp;
+	size_t len;
+
+	if (num_params != 2) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
+	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
+		TEE_PARAM_ATTR_TYPE_MEMREF_OUTPUT)
+	{
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	/*TODO do all safety checks */
+	dirp = (DIR *)params[0].b;
+	shm = (struct tee_shm *)params[1].c;
+
+	if (!dirp || !shm || !shm->addr) {
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	if (params[1].b != shm->size) {
+		LOG_WRN("memref size not match shm size");
+	}
+
+	errno = 0;
+	while (true) {
+		entry = readdir(dirp);
+		if (entry == NULL) {
+			if (errno) {
+				LOG_ERR("readdir failure (%d)", -errno);
+			}
+			return TEEC_ERROR_ITEM_NOT_FOUND;
+		}
+
+		if (entry->d_name[0] != '.') {
+			break;
+		}
+	}
+
+	len = strlen(entry->d_name) + 1;
+	if (shm->size < len) {
+		return TEEC_ERROR_SHORT_BUFFER;
+	}
+
+	memcpy(shm->addr, entry->d_name, len);
+	return TEEC_SUCCESS;
+}
+
+static int tee_fs(uint32_t num_params, struct tee_param *params)
+{
+	unsigned mrf = -1;
+
+	switch (params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) {
+	case TEE_PARAM_ATTR_TYPE_VALUE_INPUT:
+	case TEE_PARAM_ATTR_TYPE_VALUE_OUTPUT:
+	case TEE_PARAM_ATTR_TYPE_VALUE_INOUT:
+		mrf = params[0].a;
+		break;
+	default:
+		return TEEC_ERROR_BAD_PARAMETERS;
+	}
+
+	switch (mrf) {
+	case OPTEE_MRF_OPEN:
+		return tee_fs_open(num_params, params, O_RDWR);
+	case OPTEE_MRF_CREATE:
+		return tee_fs_open(num_params, params, O_RDWR | O_CREAT);
+	case OPTEE_MRF_CLOSE:
+		return tee_fs_close(num_params, params);
+	case OPTEE_MRF_READ:
+		return tee_fs_read(num_params, params);
+	case OPTEE_MRF_WRITE:
+		return tee_fs_write(num_params, params);
+	case OPTEE_MRF_TRUNCATE:
+		return tee_fs_truncate(num_params, params);
+	case OPTEE_MRF_REMOVE:
+		return tee_fs_remove(num_params, params);
+	case OPTEE_MRF_RENAME:
+		return tee_fs_rename(num_params, params);
+	case OPTEE_MRF_OPENDIR:
+		return tee_fs_opendir(num_params, params);
+	case OPTEE_MRF_CLOSEDIR:
+		return tee_fs_closedir(num_params, params);
+	case OPTEE_MRF_READDIR:
+		return tee_fs_readdir(num_params, params);
+	};
+
+	return TEEC_ERROR_BAD_PARAMETERS;
+}
+
 static int shm_alloc(const struct device *dev, uint32_t num_params,
 		     struct tee_param *params)
 {
@@ -211,6 +661,9 @@ static int process_request(const struct device *dev)
 	switch (ts_msg.req.cmd) {
 	case OPTEE_MSG_RPC_CMD_LOAD_TA:
 		rc = load_ta(ts_msg.req.num_param, ts_msg.req.params);
+		break;
+	case OPTEE_MSG_RPC_CMD_FS:
+		rc = tee_fs(ts_msg.req.num_param, ts_msg.req.params);
 		break;
 	case OPTEE_MSG_RPC_CMD_SHM_ALLOC:
 		rc = shm_alloc(dev, ts_msg.req.num_param, ts_msg.req.params);
