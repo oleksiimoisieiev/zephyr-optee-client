@@ -98,36 +98,41 @@ static int load_ta(uint32_t num_params, struct tee_param *params)
 	if (num_params != 2) {
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
+	printk("==== %s %d attr1 = %d attr2 = %d attr3 =%d\n", __func__, __LINE__,
+	       params[0].attr, params[1].attr, params[2].attr);
 
 	if ((params[0].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
 		TEE_PARAM_ATTR_TYPE_VALUE_INPUT ||
 	    (params[1].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
-		TEE_PARAM_ATTR_TYPE_MEMREF_INPUT ||
-	    (params[2].attr & TEE_PARAM_ATTR_TYPE_MASK) !=
-		TEE_PARAM_ATTR_TYPE_VALUE_OUTPUT)
+		TEE_PARAM_ATTR_TYPE_MEMREF_OUTPUT)
 	{
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
+        printk("==== %s %d\n", __func__, __LINE__);
 
-	shm = (struct tee_shm *)params[0].c;
+        shm = (struct tee_shm *)params[0].c;
+        printk("==== %s %d\n", __func__, __LINE__);
 
-	uuid_from_octets(&uuid, (uint8_t *)val_cmd);
+        uuid_from_octets(&uuid, (uint8_t *)val_cmd);
+        printk("==== %s %d\n", __func__, __LINE__);
 
-	if (shm) {
+        if (shm) {
 		size = shm->size;
 		addr = shm->addr;
 	} else {
 		size = 0;
 		addr = NULL;
 	}
+        printk("==== %s %d\n", __func__, __LINE__);
 
-	ta_found = TEECI_LoadSecureModule(&uuid, addr, &size);
+        ta_found = TEECI_LoadSecureModule(&uuid, addr, &size);
 	if (ta_found != TA_BINARY_FOUND) {
 		LOG_ERR("TA not found");
 		return TEEC_ERROR_ITEM_NOT_FOUND;
 	}
+        printk("==== %s %d\n", __func__, __LINE__);
 
-	MEMREF_SIZE(params + 1) = size;
+        MEMREF_SIZE(params + 1) = size;
 
 	/*
 	 * If a buffer wasn't provided, just tell which size it should be.
@@ -136,8 +141,9 @@ static int load_ta(uint32_t num_params, struct tee_param *params)
 	if (addr && size > (shm? shm->size: 0)) {
 		return TEEC_ERROR_SHORT_BUFFER;
 	}
+        printk("==== %s %d\n", __func__, __LINE__);
 
-	return TEEC_SUCCESS;
+        return TEEC_SUCCESS;
 }
 
 static int tee_fs_open(size_t num_params, struct tee_param *params, int flags)
@@ -657,7 +663,7 @@ static int process_request(const struct device *dev)
 		return rc;
 	}
 
-	LOG_DBG("Receive OPTEE request cmd #%d", ts_msg.req.cmd);
+	LOG_ERR("Receive OPTEE request cmd #%d", ts_msg.req.cmd);
 	switch (ts_msg.req.cmd) {
 	case OPTEE_MSG_RPC_CMD_LOAD_TA:
 		rc = load_ta(ts_msg.req.num_param, ts_msg.req.params);
