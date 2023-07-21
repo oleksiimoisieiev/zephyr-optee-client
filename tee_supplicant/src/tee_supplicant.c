@@ -694,7 +694,7 @@ static void tee_supp_main(void *p1, void *p2, void *p3)
 	}
 }
 
-static int tee_supp_init(const struct device *dev)
+static int tee_supp_init()
 {
 	const struct device *tee_dev = DEVICE_DT_GET_ONE(linaro_optee_tz);
 
