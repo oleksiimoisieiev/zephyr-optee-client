@@ -21,12 +21,59 @@ LOG_MODULE_REGISTER(ree_fs);
 #define REE_FS_PATHLEN sizeof(REE_FS_MP)
 #define REE_FS_PATH_MAX (PATH_MAX + REE_FS_PATHLEN)
 
+static int internal_open(char *path, fs_mode_t flags)
+{
+	int fd, rc;
+	struct fs_file_t *file;
+
+	file = k_malloc(sizeof(*file));
+	if (!file) {
+		return -ENOMEM;
+	}
+
+	fs_file_t_init(file);
+	fd = z_alloc_fd(file, NULL);
+	if (fd < 0) {
+		rc = TEEC_ERROR_GENERIC;
+		goto free;
+	}
+
+	rc = fs_open(file, path, flags);
+	if (rc < 0) {
+		goto free;
+	}
+	return fd;
+free:
+	if (fd >= 0) {
+		z_free_fd(fd);
+	}
+	k_free(file);
+	return rc;
+}
+
+static char *dname(char *path)
+{
+	char *slash;
+
+	slash = strrchr(path, '/');
+	if (slash != NULL) {
+		if (slash[1] == 0 && slash != path) {
+			*slash-- = 0;
+			slash = strrchr(path, '/');
+		}
+		if (slash != NULL && slash != path) {
+			*slash = 0;
+			return path;
+		}
+	}
+	return NULL;
+}
+
 static int tee_fs_open(size_t num_params, struct tee_param *params,
 		       fs_mode_t flags)
 {
 	char *name, path[REE_FS_PATH_MAX] = REE_FS_MP;
-	struct fs_file_t *file;
-	int fd, rc = TEEC_ERROR_GENERIC;
+	int fd, rc = TEEC_SUCCESS;
 
 	if (num_params != 3) {
 		return TEEC_ERROR_BAD_PARAMETERS;
@@ -47,37 +94,46 @@ static int tee_fs_open(size_t num_params, struct tee_param *params,
 	}
 	strncat(path, name, PATH_MAX);
 
-	file = k_malloc(sizeof(*file));
-	if (!file) {
-		return TEEC_ERROR_GENERIC;
-	}
-
-	fs_file_t_init(file);
-	fd = z_alloc_fd(file, NULL);
+	fd = internal_open(path, flags);
 	if (fd < 0) {
-		rc = TEEC_ERROR_GENERIC;
-		goto free;
-	}
+		if (flags & FS_O_CREATE) {
+			char *dir;
 
-	rc = fs_open(file, path, flags);
-	if (rc < 0) {
-		if (rc == -ENOENT) {
-			rc = TEEC_ERROR_ITEM_NOT_FOUND;
-			goto free;
+			dir = dname(path);
+			if (!dir) {
+				rc = TEEC_ERROR_GENERIC;
+				goto out;
+			}
+			rc = fs_mkdir(dir);
+			if (rc < 0) {
+				rc = TEEC_ERROR_GENERIC;
+				goto out;
+			}
+			strcpy(path, REE_FS_MP);
+			strncat(path, name, PATH_MAX);
+			fd = internal_open(path, flags);
+			if (fd < 0) {
+				if (rc == -ENOENT) {
+					rc = TEEC_ERROR_ITEM_NOT_FOUND;
+					goto out;
+				}
+				LOG_ERR("failed to create '%s' (%d)", path, rc);
+				rc = TEEC_ERROR_GENERIC;
+				goto out;
+			}
+		} else {
+			if (fd == -ENOENT) {
+				rc = TEEC_ERROR_ITEM_NOT_FOUND;
+				goto out;
+			}
+			LOG_ERR("failed to open '%s' (%d)", path, rc);
+			rc = TEEC_ERROR_GENERIC;
+			goto out;
 		}
-		LOG_ERR("failed to open/create %s (%d)", path, rc);
-		rc = TEEC_ERROR_GENERIC;
-		goto free;
 	}
 
 	params[2].a = fd;
-
-	return TEEC_SUCCESS;
-free:
-	if (fd >= 0) {
-		z_free_fd(fd);
-	}
-	k_free(file);
+out:
 	return rc;
 }
 
@@ -270,7 +326,33 @@ static int tee_fs_remove(size_t num_params, struct tee_param *params)
 		return TEEC_ERROR_GENERIC;
 	}
 
-	/*TODO: cleanup empty directories */
+	while (1) {
+		struct fs_dir_t dir;
+		struct fs_dirent entry;
+		char *dirname = path + strlen(REE_FS_MP);
+
+		if (!dname(dirname)) {
+			break;
+		}
+		fs_dir_t_init(&dir);
+		rc = fs_opendir(&dir, path);
+		if (rc < 0) {
+			LOG_ERR("failed to open %s (%d)", path, rc);
+			return -ENOENT;
+		}
+		rc = fs_readdir(&dir, &entry);
+		fs_closedir(&dir);
+		if (rc < 0) {
+			return rc;
+		}
+		if (entry.name[0]) {
+			break;
+		}
+		rc = fs_unlink(path);
+		if (rc < 0) {
+			return rc;
+		}
+	}
 	return TEEC_SUCCESS;
 }
 
