@@ -12,3 +12,4 @@ zephyr_library_sources(src/teec_ta_load.c)
 zephyr_library_sources(src/ree_fs.c)
 zephyr_include_directories(include)
 zephyr_include_directories(../public)
+

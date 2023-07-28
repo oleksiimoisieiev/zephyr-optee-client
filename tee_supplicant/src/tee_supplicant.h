@@ -13,6 +13,10 @@
 #define SET_MEMREF_SHM_ID(p, v)   ((p)->c = (v))
 #define SET_MEMREF_SIZE(p, v)     ((p)->b = (v))
 
+struct thread_arg {
+	const char *tee_fs_root;
+};
+
 void *tee_param_get_mem(struct tee_param *param, size_t *size);
 
 #endif /* TEE_SUPPLICANT_H */

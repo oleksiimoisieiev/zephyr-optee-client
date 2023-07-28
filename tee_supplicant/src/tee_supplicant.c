@@ -270,7 +270,7 @@ static int shm_free(uint32_t num_params, struct tee_param *params)
 	return TEEC_SUCCESS;
 }
 
-static int process_request(const struct device *dev)
+static int process_request(const struct device *dev, struct thread_arg *arg)
 {
 	int rc;
 	struct tee_supp_msg ts_msg = {
@@ -288,7 +288,7 @@ static int process_request(const struct device *dev)
 		rc = load_ta(ts_msg.num_param, ts_msg.params);
 		break;
 	case OPTEE_MSG_RPC_CMD_FS:
-		rc = tee_fs(ts_msg.num_param, ts_msg.params);
+		rc = tee_fs(arg, ts_msg.num_param, ts_msg.params);
 		break;
 	case OPTEE_MSG_RPC_CMD_SHM_ALLOC:
 		rc = shm_alloc(dev, ts_msg.num_param, ts_msg.params);
@@ -306,14 +306,18 @@ static int process_request(const struct device *dev)
 
 static void tee_supp_main(void *p1, void *p2, void *p3)
 {
-	ARG_UNUSED(p2);
 	ARG_UNUSED(p3);
 	const struct device *dev = p1;
+	struct thread_arg *arg = (struct thread_arg *)p2;
 	int rc = 0;
 
+	if (!arg) {
+		LOG_ERR("Invalid argument");
+		return;
+	}
 	/* TODO: implement terminating supplicant's thread */
 	while (1) {
-		rc = process_request(dev);
+		rc = process_request(dev, arg);
 		if (rc) {
 			LOG_ERR("Failed to process request, rc = %d", rc);
 		}
@@ -323,7 +327,9 @@ static void tee_supp_main(void *p1, void *p2, void *p3)
 static int tee_supp_init(const struct device *dev)
 {
 	const struct device *tee_dev = DEVICE_DT_GET_ONE(linaro_optee_tz);
+	struct thread_arg *arg = NULL;
 	struct tee_version_info info = { 0 };
+	int rc;
 
 	if (!tee_dev) {
 		LOG_ERR("No TrustZone device found!");
@@ -340,9 +346,15 @@ static int tee_supp_init(const struct device *dev)
 		LOG_ERR("Only shared memory registration supported");
 		return -EINVAL;
 	}
+	arg = k_malloc(sizeof(struct thread_arg));
+	if (!arg) {
+		LOG_ERR("Unable to allocate thread arg");
+		return -ENOMEM;
+	}
+	arg->tee_fs_root = CONFIG_OPTEE_STORAGE_ROOT;
 
 	k_thread_create(&main_thread, main_stack, K_THREAD_STACK_SIZEOF(main_stack), tee_supp_main,
-			(void *) tee_dev, NULL, NULL, TEE_SUPP_THREAD_PRIO, 0, K_NO_WAIT);
+			(void *) tee_dev, arg, NULL, TEE_SUPP_THREAD_PRIO, 0, K_NO_WAIT);
 
 	LOG_INF("Started tee_supplicant thread");
 	return 0;

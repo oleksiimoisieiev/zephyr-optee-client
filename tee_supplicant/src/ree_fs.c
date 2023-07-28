@@ -15,12 +15,6 @@
 
 LOG_MODULE_REGISTER(ree_fs);
 
-/* where FS gets mounted */
-/*TODO: make it in sync with DTS fstab */
-#define REE_FS_MP "/tee"
-#define REE_FS_PATHLEN sizeof(REE_FS_MP)
-#define REE_FS_PATH_MAX (PATH_MAX + REE_FS_PATHLEN)
-
 static int internal_open(char *path, fs_mode_t flags)
 {
 	int fd, rc;
@@ -69,10 +63,10 @@ static char *dname(char *path)
 	return NULL;
 }
 
-static int tee_fs_open(size_t num_params, struct tee_param *params,
+static int tee_fs_open(struct thread_arg *arg, size_t num_params, struct tee_param *params,
 		       fs_mode_t flags)
 {
-	char *name, path[REE_FS_PATH_MAX] = REE_FS_MP;
+	char *name, path[PATH_MAX];
 	int fd, rc = TEEC_SUCCESS;
 
 	if (num_params != 3) {
@@ -88,6 +82,7 @@ static int tee_fs_open(size_t num_params, struct tee_param *params,
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 
+	strcpy(path, arg->tee_fs_root);
 	name = tee_param_get_mem(params + 1, NULL);
 	if (!name) {
 		return TEEC_ERROR_BAD_PARAMETERS;
@@ -109,7 +104,7 @@ static int tee_fs_open(size_t num_params, struct tee_param *params,
 				rc = TEEC_ERROR_GENERIC;
 				goto out;
 			}
-			strcpy(path, REE_FS_MP);
+			strcpy(path, arg->tee_fs_root);
 			strncat(path, name, PATH_MAX);
 			fd = internal_open(path, flags);
 			if (fd < 0) {
@@ -295,9 +290,9 @@ static int tee_fs_truncate(size_t num_params, struct tee_param *params)
 	return TEEC_SUCCESS;
 }
 
-static int tee_fs_remove(size_t num_params, struct tee_param *params)
+static int tee_fs_remove(struct thread_arg *arg, size_t num_params, struct tee_param *params)
 {
-	char *name, path[REE_FS_PATH_MAX] = REE_FS_MP;
+	char *name, path[PATH_MAX];
 	int rc;
 
 	if (num_params != 2) {
@@ -311,6 +306,7 @@ static int tee_fs_remove(size_t num_params, struct tee_param *params)
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 
+	strcpy(path, arg->tee_fs_root);
 	name = tee_param_get_mem(params + 1, NULL);
 	if (!name) {
 		return TEEC_ERROR_BAD_PARAMETERS;
@@ -329,7 +325,7 @@ static int tee_fs_remove(size_t num_params, struct tee_param *params)
 	while (1) {
 		struct fs_dir_t dir;
 		struct fs_dirent entry;
-		char *dirname = path + strlen(REE_FS_MP);
+		char *dirname = path + strlen(arg->tee_fs_root);
 
 		if (!dname(dirname)) {
 			break;
@@ -356,10 +352,10 @@ static int tee_fs_remove(size_t num_params, struct tee_param *params)
 	return TEEC_SUCCESS;
 }
 
-static int tee_fs_rename(size_t num_params, struct tee_param *params)
+static int tee_fs_rename(struct thread_arg *arg, size_t num_params, struct tee_param *params)
 {
-	char *name, path[REE_FS_PATH_MAX] = REE_FS_MP;
-	char *new_name, new_path[REE_FS_PATH_MAX] = REE_FS_MP;
+	char *name, path[PATH_MAX];
+	char *new_name, new_path[PATH_MAX];
 	int rc;
 
 	if (num_params != 3) {
@@ -375,12 +371,14 @@ static int tee_fs_rename(size_t num_params, struct tee_param *params)
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 
+	strcpy(path, arg->tee_fs_root);
 	name = tee_param_get_mem(params + 1, NULL);
 	if (!name) {
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 	strncat(path, name, PATH_MAX);
 
+	strcpy(new_path, arg->tee_fs_root);
 	new_name = tee_param_get_mem(params + 2, NULL);
 	if (!new_name) {
 		return TEEC_ERROR_BAD_PARAMETERS;
@@ -406,9 +404,9 @@ static int tee_fs_rename(size_t num_params, struct tee_param *params)
 	return TEEC_SUCCESS;
 }
 
-static int tee_fs_opendir(size_t num_params, struct tee_param *params)
+static int tee_fs_opendir(struct thread_arg *arg, size_t num_params, struct tee_param *params)
 {
-	char *name, path[REE_FS_PATH_MAX] = REE_FS_MP;
+	char *name, path[PATH_MAX];
 	struct fs_dir_t *dir;
 	int rc;
 
@@ -425,6 +423,7 @@ static int tee_fs_opendir(size_t num_params, struct tee_param *params)
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 
+	strcpy(path, arg->tee_fs_root);
 	name = tee_param_get_mem(params + 1, NULL);
 	if (!name) {
 		return TEEC_ERROR_BAD_PARAMETERS;
@@ -524,7 +523,7 @@ static int tee_fs_readdir(size_t num_params, struct tee_param *params)
 	return TEEC_SUCCESS;
 }
 
-int tee_fs(uint32_t num_params, struct tee_param *params)
+int tee_fs(struct thread_arg *arg, uint32_t num_params, struct tee_param *params)
 {
 	unsigned int mrf = -1;
 
@@ -540,9 +539,9 @@ int tee_fs(uint32_t num_params, struct tee_param *params)
 
 	switch (mrf) {
 	case OPTEE_MRF_OPEN:
-		return tee_fs_open(num_params, params, FS_O_RDWR);
+		return tee_fs_open(arg, num_params, params, FS_O_RDWR);
 	case OPTEE_MRF_CREATE:
-		return tee_fs_open(num_params, params, FS_O_RDWR | FS_O_CREATE);
+		return tee_fs_open(arg, num_params, params, FS_O_RDWR | FS_O_CREATE);
 	case OPTEE_MRF_CLOSE:
 		return tee_fs_close(num_params, params);
 	case OPTEE_MRF_READ:
@@ -552,11 +551,11 @@ int tee_fs(uint32_t num_params, struct tee_param *params)
 	case OPTEE_MRF_TRUNCATE:
 		return tee_fs_truncate(num_params, params);
 	case OPTEE_MRF_REMOVE:
-		return tee_fs_remove(num_params, params);
+		return tee_fs_remove(arg, num_params, params);
 	case OPTEE_MRF_RENAME:
-		return tee_fs_rename(num_params, params);
+		return tee_fs_rename(arg, num_params, params);
 	case OPTEE_MRF_OPENDIR:
-		return tee_fs_opendir(num_params, params);
+		return tee_fs_opendir(arg, num_params, params);
 	case OPTEE_MRF_CLOSEDIR:
 		return tee_fs_closedir(num_params, params);
 	case OPTEE_MRF_READDIR:

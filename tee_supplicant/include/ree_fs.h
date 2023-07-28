@@ -6,4 +6,6 @@
 #pragma once
 #include <tee_client_api.h>
 
-int tee_fs(uint32_t num_params, struct tee_param *params);
+struct thread_arg;
+
+int tee_fs(struct thread_arg *arg, uint32_t num_params, struct tee_param *params);
