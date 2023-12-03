@@ -15,18 +15,75 @@
 
 LOG_MODULE_REGISTER(ree_fs);
 
+#define MAX_FILES		20
+
+static struct fs_file_t *files[MAX_FILES] = {0};
+K_MUTEX_DEFINE(file_mutex);
+
+static struct fs_file_t *find_file(int fd)
+{
+	struct fs_file_t *file;
+
+	if (fd < 0 || fd >= MAX_FILES) {
+		return NULL;
+	}
+
+	k_mutex_lock(&file_mutex, K_FOREVER);
+	file = files[fd];
+	k_mutex_unlock(&file_mutex);
+	return file;
+}
+
+static void remove_file(int fd)
+{
+	struct fs_file_t *file;
+
+	if (fd < 0 || fd >= MAX_FILES) {
+		return;
+	}
+	k_mutex_lock(&file_mutex, K_FOREVER);
+	file = files[fd];
+	if (file) {
+		k_free(file);
+	}
+	files[fd] = NULL;
+	k_mutex_unlock(&file_mutex);
+	return;
+}
+
+static int new_file(struct fs_file_t **file)
+{
+	int fd;
+
+	if (!file) {
+		return -EINVAL;
+	}
+
+	*file = k_malloc(sizeof(struct fs_file_t));
+	if (!(*file)) {
+		return -ENOMEM;
+	}
+
+	k_mutex_lock(&file_mutex, K_FOREVER);
+	fs_file_t_init(*file);
+	for (fd = 0; fd < MAX_FILES; fd++) {
+		if (!files[fd]) {
+			files[fd] = *file;
+			k_mutex_unlock(&file_mutex);
+			return fd;
+		}
+	}
+	k_mutex_unlock(&file_mutex);
+
+	return -EMFILE;
+}
+
 static int internal_open(char *path, fs_mode_t flags)
 {
 	int fd, rc;
 	struct fs_file_t *file;
 
-	file = k_malloc(sizeof(*file));
-	if (!file) {
-		return -ENOMEM;
-	}
-
-	fs_file_t_init(file);
-	fd = z_alloc_fd(file, NULL);
+	fd = new_file(&file);
 	if (fd < 0) {
 		rc = TEEC_ERROR_GENERIC;
 		goto free;
@@ -39,9 +96,8 @@ static int internal_open(char *path, fs_mode_t flags)
 	return fd;
 free:
 	if (fd >= 0) {
-		z_free_fd(fd);
+		remove_file(fd);
 	}
-	k_free(file);
 	return rc;
 }
 
@@ -144,15 +200,14 @@ static int tee_fs_close(size_t num_params, struct tee_param *params)
 
 	fd = params[0].b;
 
-	file = z_get_fd_obj(fd, NULL, 0);
+	file = find_file(fd);
 	if (!file) {
 		LOG_ERR("fd %d not found", fd);
 		return TEEC_ERROR_BAD_PARAMETERS;
 	}
 
 	rc = fs_close(file);
-	z_free_fd(fd);
-	k_free(file);
+	remove_file(fd);
 
 	if (rc < 0) {
 		LOG_ERR("failed to close file (%d)", rc);
@@ -185,7 +240,7 @@ static int tee_fs_read(size_t num_params, struct tee_param *params)
 	fd = params[0].b;
 	offset = params[0].c;
 
-	file = z_get_fd_obj(fd, NULL, 0);
+	file = find_file(fd);
 	if (!file) {
 		return TEEC_ERROR_ITEM_NOT_FOUND;
 	}
@@ -242,7 +297,7 @@ static int tee_fs_write(size_t num_params, struct tee_param *params)
 	fd = params[0].b;
 	offset = params[0].c;
 
-	file = z_get_fd_obj(fd, NULL, 0);
+	file = find_file(fd);
 	if (!file) {
 		return TEEC_ERROR_ITEM_NOT_FOUND;
 	}
@@ -290,7 +345,7 @@ static int tee_fs_truncate(size_t num_params, struct tee_param *params)
 	fd = params[0].b;
 	len = params[0].c;
 
-	file = z_get_fd_obj(fd, NULL, 0);
+	file = find_file(fd);
 	if (!file) {
 		return TEEC_ERROR_ITEM_NOT_FOUND;
 	}
